@@ -1,0 +1,32 @@
+version: '3.8'
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: dwn
+      POSTGRES_PASSWORD: dwn_password
+      POSTGRES_DB: mini_dwn
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dwn"]
+      interval: 5s
+      retries: 10
+  mini-dwn:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://dwn:dwn_password@postgres:5432/mini_dwn
+      DWN_HOST: 0.0.0.0
+      DWN_PORT: 3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+volumes:
+  postgres_data:
