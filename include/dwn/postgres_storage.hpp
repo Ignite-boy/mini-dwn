@@ -14,6 +14,13 @@ public:
     bool health_check() override;
     bool ensure_tenant(const std::string& targetDid) override;
 
+    // Milan REST compatibility: persistent database snapshots.
+    bool put_database_snapshot(const std::string& name,
+                               const nlohmann::json& data,
+                               const std::string& pushedAt);
+    std::optional<nlohmann::json> get_database_snapshot(const std::string& name,
+                                                        std::string* pushedAt = nullptr);
+
     bool write_record(const Record& record) override;
     std::optional<Record> read_record(const std::string& targetDid, const std::string& recordId) override;
     std::vector<Record> query_records(const std::string& targetDid, const RecordsFilter& filter) override;

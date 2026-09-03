@@ -2,6 +2,7 @@
 #include "dwn/server.hpp"
 #include "dwn/errors.hpp"
 #include "dwn/utils.hpp"
+#include "dwn/postgres_storage.hpp"
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/websocket.hpp>
@@ -42,6 +43,94 @@ nlohmann::json DwnServer::info_json(){
 }
 nlohmann::json DwnServer::metrics_json(){
     return {{"uptime","unknown"},{"rateLimitPerMin", config_.rate_limit_per_min},{"maxRequestBytes", config_.max_request_bytes}};
+}
+
+void DwnServer::handle_database_snapshot(
+    const http::request<http::string_body>& req,
+    http::response<http::string_body>& res,
+    const std::string& name){
+
+    auto* pg = dynamic_cast<PostgresStorage*>(&storage_);
+    if(!pg){
+        res.result(http::status::not_implemented);
+        res.set(http::field::content_type, "application/json");
+        res.body() = R"({"ok":false,"error":"Postgres snapshot backend unavailable"})";
+        res.prepare_payload();
+        return;
+    }
+
+    try {
+        if(req.method() == http::verb::put){
+            auto body = nlohmann::json::parse(req.body());
+
+            nlohmann::json data =
+                body.contains("data") ? body["data"] : body;
+
+            std::string pushedAt =
+                body.value("pushedAt", std::string());
+
+            if(!pg->put_database_snapshot(name, data, pushedAt)){
+                res.result(http::status::internal_server_error);
+                res.set(http::field::content_type, "application/json");
+                res.body() = R"({"ok":false,"error":"snapshot write failed"})";
+                res.prepare_payload();
+                return;
+            }
+
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = nlohmann::json{
+                {"ok", true},
+                {"stored", true},
+                {"name", name},
+                {"pushedAt", pushedAt.empty() ? nlohmann::json(nullptr) : nlohmann::json(pushedAt)}
+            }.dump();
+            res.prepare_payload();
+            return;
+        }
+
+        if(req.method() == http::verb::get){
+            std::string pushedAt;
+            auto data = pg->get_database_snapshot(name, &pushedAt);
+
+            if(!data){
+                res.result(http::status::not_found);
+                res.set(http::field::content_type, "application/json");
+                res.body() = nlohmann::json{
+                    {"ok", false},
+                    {"error", "snapshot not found"},
+                    {"name", name}
+                }.dump();
+                res.prepare_payload();
+                return;
+            }
+
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = nlohmann::json{
+                {"ok", true},
+                {"name", name},
+                {"data", *data},
+                {"pushedAt", pushedAt}
+            }.dump();
+            res.prepare_payload();
+            return;
+        }
+
+        res.result(http::status::method_not_allowed);
+        res.set(http::field::content_type, "application/json");
+        res.body() = R"({"ok":false,"error":"method not allowed"})";
+        res.prepare_payload();
+
+    } catch(const std::exception& e){
+        res.result(http::status::bad_request);
+        res.set(http::field::content_type, "application/json");
+        res.body() = nlohmann::json{
+            {"ok", false},
+            {"error", std::string("snapshot request failed: ") + e.what()}
+        }.dump();
+        res.prepare_payload();
+    }
 }
 
 bool DwnServer::check_rate_limit(const std::string& ip){
@@ -85,7 +174,98 @@ void DwnServer::handle_http(http::request<http::string_body>& req, http::respons
         res.body() = nlohmann::json{{"version", config_.version}}.dump();
         res.prepare_payload(); return;
     }
+    // Milan REST user provisioning compatibility routes.
+    const std::vector<std::string> provisionPrefixes = {
+        "/api/dwn/users/provision",
+        "/api/cloud-dwn/users/provision",
+        "/api/dwn/user/provision"
+    };
+
+    for(const auto& route : provisionPrefixes){
+        if(target == route && req.method() == http::verb::post){
+            try {
+                auto body = nlohmann::json::parse(req.body());
+                const std::string did = body.value("did", "");
+
+                if(did.empty()){
+                    res.result(http::status::bad_request);
+                    res.set(http::field::content_type, "application/json");
+                    res.body() = R"({"ok":false,"error":"did required"})";
+                    res.prepare_payload();
+                    return;
+                }
+
+                if(!storage_.ensure_tenant(did)){
+                    res.result(http::status::internal_server_error);
+                    res.set(http::field::content_type, "application/json");
+                    res.body() = R"({"ok":false,"error":"tenant provisioning failed"})";
+                    res.prepare_payload();
+                    return;
+                }
+
+                res.result(http::status::ok);
+                res.set(http::field::content_type, "application/json");
+                res.body() = nlohmann::json{
+                    {"ok", true},
+                    {"provisioned", true},
+                    {"spaceId", body.value("spaceId", "")},
+                    {"ownerDid", did},
+                    {"did", did},
+                    {"userId", body.value("userId", "")},
+                    {"email", body.value("email", "")},
+                    {"realDwnProtocol", true}
+                }.dump();
+                res.prepare_payload();
+                return;
+            } catch(const std::exception& e){
+                res.result(http::status::bad_request);
+                res.set(http::field::content_type, "application/json");
+                res.body() = nlohmann::json{
+                    {"ok", false},
+                    {"error", std::string("provision failed: ") + e.what()}
+                }.dump();
+                res.prepare_payload();
+                return;
+            }
+        }
+    }
+
+    // Milan REST database snapshot compatibility routes.
+    // These map to the same PostgreSQL-backed snapshot store.
+    const std::vector<std::string> snapshotPrefixes = {
+        "/api/dwn/database/",
+        "/api/cloud-dwn/database/",
+        "/api/cloud-dwn/db/",
+        "/api/dwn/database/write/",
+        "/api/dwn/database/read/",
+        "/api/dwn/snapshot/",
+        "/api/cloud-dwn/node/database/",
+        "/api/dwn/db/",
+        "/api/dwn/databases/",
+        "/api/cloud-dwn/snapshot/",
+        "/api/cloud-dwn/snapshots/",
+        "/api/dwn/database/snapshot/",
+        "/api/cloud-dwn/database/write/",
+        "/api/cloud-dwn/database/read/"
+    };
+
+    for(const auto& prefix : snapshotPrefixes){
+        if(target.rfind(prefix, 0) == 0 && target.size() > prefix.size()){
+            const std::string name = target.substr(prefix.size());
+            handle_database_snapshot(req, res, name);
+            return;
+        }
+    }
+
     if(target=="/json-rpc" && req.method()==http::verb::post){
+        const std::string authz = std::string(req[http::field::authorization]);
+        if(authz != "Bearer milan-v49-embedded-production-dwn-key"){
+            res.result(http::status::unauthorized);
+            res.set(http::field::content_type,"application/json");
+            res.body() = R"({"error":"Unauthorized"})";
+            res.prepare_payload();
+            return;
+        }
         // Rate limit check
         std::string ip = "unknown"; // would extract from socket in handle_session
         // Process JSON-RPC

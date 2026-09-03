@@ -40,6 +40,11 @@ private:
     void handle_http(boost::beast::http::request<boost::beast::http::string_body>& req,
                      boost::beast::http::response<boost::beast::http::string_body>& res);
 
+    void handle_database_snapshot(
+        const boost::beast::http::request<boost::beast::http::string_body>& req,
+        boost::beast::http::response<boost::beast::http::string_body>& res,
+        const std::string& name);
+
     struct RateBucket { int count; std::chrono::steady_clock::time_point window_start; };
     std::unordered_map<std::string, RateBucket> rate_buckets_;
     std::mutex rate_mu_;

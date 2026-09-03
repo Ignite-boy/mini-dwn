@@ -13,6 +13,7 @@ option(ENABLE_TLS "Enable TLS support via OpenSSL" ON)
 find_package(Boost 1.74 REQUIRED COMPONENTS system thread)
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
+find_package(PostgreSQL REQUIRED)
 
 # nlohmann/json - header-only, try find_package else FetchContent
 find_package(nlohmann_json 3.10 QUIET)
@@ -26,17 +27,8 @@ if(NOT nlohmann_json_FOUND)
 endif()
 
 # libpqxx
-find_package(PkgConfig QUIET)
-if(PKG_CONFIG_FOUND)
-    pkg_check_modules(PQXX REQUIRED libpqxx)
-endif()
-
-if(NOT PQXX_FOUND)
-    find_library(PQXX_LIB pqxx REQUIRED)
-    find_path(PQXX_INCLUDE pqxx/pqxx REQUIRED)
-    set(PQXX_LIBRARIES ${PQXX_LIB})
-    set(PQXX_INCLUDE_DIRS ${PQXX_INCLUDE})
-endif()
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PQXX REQUIRED IMPORTED_TARGET libpqxx)
 
 # libsodium
 find_library(SODIUM_LIB sodium)
@@ -47,6 +39,7 @@ file(GLOB_RECURSE LIB_SOURCES src/*.cpp)
 list(REMOVE_ITEM LIB_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp)
 
 add_library(dwn_core STATIC ${LIB_SOURCES})
+target_link_directories(dwn_core PUBLIC /opt/pqxx/lib)
 target_include_directories(dwn_core PUBLIC include ${SODIUM_INCLUDE} ${PQXX_INCLUDE_DIRS})
 target_link_libraries(dwn_core PUBLIC
     Boost::system
@@ -56,13 +49,10 @@ target_link_libraries(dwn_core PUBLIC
     nlohmann_json::nlohmann_json
     Threads::Threads
     ${SODIUM_LIB}
-    ${PQXX_LIBRARIES}
+    PkgConfig::PQXX
+    PostgreSQL::PostgreSQL
+    Threads::Threads
 )
-if(PQXX_INCLUDE_DIRS)
-    target_include_directories(dwn_core PUBLIC ${PQXX_INCLUDE_DIRS})
-    target_link_directories(dwn_core PUBLIC ${PQXX_LIBRARY_DIRS})
-endif()
-
 add_executable(mini-dwn src/main.cpp)
 target_link_libraries(mini-dwn PRIVATE dwn_core)
 

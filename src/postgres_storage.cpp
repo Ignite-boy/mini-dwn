@@ -9,6 +9,20 @@ PostgresStorage::PostgresStorage(const std::string& conn_str)
     : conn_str_(conn_str) {
     try {
         conn_ = std::make_unique<pqxx::connection>(conn_str_);
+
+        // Persistent JSON snapshots used by Milan's existing REST
+        // compatibility layer. Safe to run repeatedly.
+        {
+            pqxx::work w(*conn_);
+            w.exec(R"(
+                CREATE TABLE IF NOT EXISTS dwn_database_snapshots (
+                    name TEXT PRIMARY KEY,
+                    data JSONB NOT NULL,
+                    pushed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            )");
+            w.commit();
+        }
     } catch(const std::exception& e){
         std::cerr << "Postgres connection failed: " << e.what() << "\n";
         throw;
@@ -47,6 +61,71 @@ bool PostgresStorage::ensure_tenant(const std::string& targetDid){
     } catch(const std::exception& e){
         std::cerr << "ensure_tenant error: " << e.what() << "\n";
         return false;
+    }
+}
+
+bool PostgresStorage::put_database_snapshot(const std::string& name,
+                                              const nlohmann::json& data,
+                                              const std::string& pushedAt){
+    try {
+        auto& c = get_conn();
+        pqxx::work w(c);
+
+        w.exec_params(
+            R"(
+                INSERT INTO dwn_database_snapshots (name, data, pushed_at)
+                VALUES ($1, $2::jsonb, COALESCE(NULLIF($3, '')::timestamptz, NOW()))
+                ON CONFLICT (name) DO UPDATE SET
+                    data = EXCLUDED.data,
+                    pushed_at = EXCLUDED.pushed_at
+            )",
+            name,
+            data.dump(),
+            pushedAt
+        );
+
+        w.commit();
+        return true;
+    } catch(const std::exception& e){
+        std::cerr << "put_database_snapshot error: " << e.what() << "\n";
+        return false;
+    }
+}
+
+std::optional<nlohmann::json> PostgresStorage::get_database_snapshot(
+    const std::string& name,
+    std::string* pushedAt){
+    try {
+        auto& c = get_conn();
+        pqxx::work w(c);
+
+        auto r = w.exec_params(
+            "SELECT data::text, pushed_at::text "
+            "FROM dwn_database_snapshots WHERE name=$1",
+            name
+        );
+
+        if(r.empty()){
+            w.commit();
+            return std::nullopt;
+        }
+
+        nlohmann::json data;
+        try {
+            data = nlohmann::json::parse(r[0][0].as<std::string>());
+        } catch(...) {
+            data = nlohmann::json::object();
+        }
+
+        if(pushedAt) {
+            *pushedAt = r[0][1].as<std::string>();
+        }
+
+        w.commit();
+        return data;
+    } catch(const std::exception& e){
+        std::cerr << "get_database_snapshot error: " << e.what() << "\n";
+        return std::nullopt;
     }
 }
 
