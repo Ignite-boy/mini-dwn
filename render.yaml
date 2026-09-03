@@ -13,4 +13,6 @@ services:
       - key: DWN_PORT
         value: 10000
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: mini-dwn-db
+          property: connectionString
